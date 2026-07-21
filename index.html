@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>OpenF1 Lap Trace Compare</title>
+    <link rel="stylesheet" href="styles.css?v=20260721-3">
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <p class="eyebrow">OpenF1 telemetry</p>
+        <h1>Lap Trace Compare</h1>
+      </div>
+      <div class="display-controls" aria-label="Plot settings">
+        <fieldset class="toolbar-group telemetry-group">
+          <legend>Telemetry</legend>
+          <div id="metric-options" class="metric-options"></div>
+        </fieldset>
+        <fieldset class="toolbar-group axis-group">
+          <legend>X-axis</legend>
+          <div class="segmented-control">
+            <label>
+              <input type="radio" name="axis-mode" value="time">
+              <span>Time</span>
+            </label>
+            <label>
+              <input type="radio" name="axis-mode" value="track" checked>
+              <span>Track position</span>
+            </label>
+          </div>
+        </fieldset>
+        <fieldset class="toolbar-group panel-group">
+          <legend>Panels</legend>
+          <div class="panel-options">
+            <label class="metric-pill">
+              <input id="track-map-toggle" type="checkbox" checked>
+              <span>Track map</span>
+            </label>
+            <label class="metric-pill">
+              <input id="data-delta-toggle" type="checkbox" checked>
+              <span>Data delta</span>
+            </label>
+          </div>
+        </fieldset>
+      </div>
+    </header>
+
+    <main>
+      <section class="controls-shell" aria-label="Trace selections">
+        <div class="section-title">
+          <h2>Selections</h2>
+          <button id="add-comparison" type="button">+ Add comparison</button>
+        </div>
+        <div id="comparison-list" class="comparison-list"></div>
+      </section>
+
+      <section class="plot-shell" aria-label="Comparison chart">
+        <div class="plot-header">
+          <div>
+            <h2 id="plot-title">Telemetry trace</h2>
+            <p id="plot-subtitle">Choose a session and driver, then plot telemetry.</p>
+            <p id="axis-status" class="axis-status">X-axis: track position (0% to 100%)</p>
+          </div>
+          <div class="plot-actions">
+            <div class="zoom-controls" aria-label="Plot zoom controls">
+              <button id="zoom-out" class="tool-button" type="button" aria-label="Zoom out" title="Zoom out" disabled>&minus;</button>
+              <button id="zoom-in" class="tool-button" type="button" aria-label="Zoom in" title="Zoom in" disabled>+</button>
+              <button id="reset-zoom" class="secondary-button" type="button" disabled>Reset zoom</button>
+            </div>
+            <button id="plot-button" type="button">Plot comparison</button>
+          </div>
+        </div>
+        <div id="legend" class="legend" aria-label="Compared laps"></div>
+        <div class="viz-grid">
+          <div class="canvas-wrap">
+            <canvas id="trace-canvas" role="img" aria-label="Telemetry and delta traces"></canvas>
+            <div id="empty-state" class="empty-state">No trace plotted yet</div>
+          </div>
+          <div id="track-map-panel" class="map-shell" hidden>
+            <div class="map-header">
+              <div>
+                <h2>Track map</h2>
+                <p id="marker-status">No markers</p>
+              </div>
+              <button id="clear-markers" class="secondary-button" type="button" disabled>Clear markers</button>
+            </div>
+            <div class="map-canvas-wrap">
+              <canvas id="track-map-canvas" role="img" aria-label="Track map with car positions and selection markers"></canvas>
+            </div>
+          </div>
+        </div>
+        <div id="delta-readout" class="delta-readout" hidden></div>
+        <div id="status" class="status" role="status"></div>
+      </section>
+    </main>
+
+    <template id="comparison-template">
+      <article class="comparison-row">
+        <div class="row-top">
+          <strong class="row-title"></strong>
+          <button class="remove-row" type="button" aria-label="Remove comparison">Remove</button>
+        </div>
+        <div class="field-grid">
+          <label>
+            <span>Year</span>
+            <select data-field="year"></select>
+          </label>
+          <label>
+            <span>Grand Prix</span>
+            <select data-field="meeting"></select>
+          </label>
+          <label>
+            <span>Session</span>
+            <select data-field="session"></select>
+          </label>
+          <label>
+            <span>Driver</span>
+            <select data-field="driver"></select>
+          </label>
+          <label>
+            <span>Lap</span>
+            <select data-field="lap"></select>
+          </label>
+        </div>
+      </article>
+    </template>
+
+    <script src="app.js?v=20260721-5"></script>
+  </body>
+</html>
