@@ -12,16 +12,40 @@ const SESSION_ORDER = [
 const SERIES_COLORS = ["#e10600", "#008c95", "#6f42c1", "#f59e0b", "#111827", "#1d9a4a"];
 const MARKER_COLORS = ["#1261a0", "#b14900"];
 const CHART_PAD = { top: 28, right: 24, bottom: 54, left: 72 };
+const GG_PAD = { top: 22, right: 24, bottom: 56, left: 66 };
 const PANEL_GAP = 42;
 const MIN_PANEL_HEIGHT = 100;
+const MAX_ACCELERATION_MPS2 = 100;
+const MAP_SPEED_NEUTRAL_THRESHOLD = 1;
+const MAP_SPEED_NEUTRAL_COLOR = "#8f8880";
 const METRICS = [
   { key: "speed", label: "Speed", unit: "km/h", minZero: true },
+  {
+    key: "longitudinal_acceleration",
+    label: "Longitudinal acceleration",
+    unit: "m/s²",
+    derived: true,
+    symmetric: true,
+    help: "Estimated from the rate of change in speed. Positive is acceleration; negative is braking.",
+  },
+  {
+    key: "lateral_acceleration",
+    label: "Lateral acceleration",
+    unit: "m/s²",
+    derived: true,
+    symmetric: true,
+    needsLocation: true,
+    help: "Estimated from speed and change in direction. Positive and negative values are opposite turning directions.",
+  },
   { key: "throttle", label: "Throttle", unit: "%", min: 0, max: 100 },
   { key: "brake", label: "Brake", unit: "%", min: 0, max: 100 },
   { key: "rpm", label: "RPM", unit: "rpm", minZero: true },
   { key: "n_gear", label: "Gear", unit: "gear", min: 1, max: 8, discrete: true },
   { key: "drs", label: "DRS", unit: "state", minZero: true },
 ];
+const SPEED_METRIC = METRICS.find((metric) => metric.key === "speed");
+const LONGITUDINAL_ACCELERATION_METRIC = METRICS.find((metric) => metric.key === "longitudinal_acceleration");
+const LATERAL_ACCELERATION_METRIC = METRICS.find((metric) => metric.key === "lateral_acceleration");
 
 const state = {
   rows: [],
@@ -43,10 +67,13 @@ const state = {
 const metricOptions = document.querySelector("#metric-options");
 const trackMapToggle = document.querySelector("#track-map-toggle");
 const dataDeltaToggle = document.querySelector("#data-delta-toggle");
+const mapSpeedDeltaToggle = document.querySelector("#map-speed-delta-toggle");
+const ggToggle = document.querySelector("#gg-toggle");
 const axisModeInputs = [...document.querySelectorAll('input[name="axis-mode"]')];
 const comparisonList = document.querySelector("#comparison-list");
 const comparisonTemplate = document.querySelector("#comparison-template");
 const addButton = document.querySelector("#add-comparison");
+const addButtonBottom = document.querySelector("#add-comparison-bottom");
 const plotButton = document.querySelector("#plot-button");
 const zoomOutButton = document.querySelector("#zoom-out");
 const zoomInButton = document.querySelector("#zoom-in");
@@ -55,6 +82,10 @@ const clearMarkersButton = document.querySelector("#clear-markers");
 const canvas = document.querySelector("#trace-canvas");
 const mapPanel = document.querySelector("#track-map-panel");
 const mapCanvas = document.querySelector("#track-map-canvas");
+const mapSpeedLegend = document.querySelector("#map-speed-legend");
+const ggPanel = document.querySelector("#gg-panel");
+const ggCanvas = document.querySelector("#gg-canvas");
+const ggStatus = document.querySelector("#gg-status");
 const emptyState = document.querySelector("#empty-state");
 const legend = document.querySelector("#legend");
 const deltaReadout = document.querySelector("#delta-readout");
@@ -65,12 +96,14 @@ const axisStatus = document.querySelector("#axis-status");
 const markerStatus = document.querySelector("#marker-status");
 const ctx = canvas.getContext("2d");
 const mapCtx = mapCanvas.getContext("2d");
+const ggCtx = ggCanvas.getContext("2d");
 
 function initMetricOptions() {
   metricOptions.innerHTML = "";
   for (const metric of METRICS) {
     const label = document.createElement("label");
     label.className = "metric-pill";
+    if (metric.help) label.title = metric.help;
     label.innerHTML = `
       <input type="checkbox" name="metric" value="${metric.key}" ${metric.key === "speed" ? "checked" : ""}>
       <span>${metric.label}</span>
@@ -198,6 +231,100 @@ function fastestLap(laps) {
   }, null);
 }
 
+function selectedLapNumbers(row) {
+  const select = field(row, "lap");
+  return [...select.options]
+    .filter((option) => option.selected && option.value)
+    .map((option) => Number(option.value))
+    .filter(Number.isFinite);
+}
+
+function setLapOptions(select, laps) {
+  select.innerHTML = "";
+  if (!laps.length) {
+    const option = new Option("No timed laps", "");
+    option.disabled = true;
+    select.append(option);
+    select.disabled = true;
+    return;
+  }
+
+  const best = fastestLap(laps);
+  for (const lap of laps) {
+    const fastestLabel = best?.lap_number === lap.lap_number ? " · fastest" : "";
+    select.append(new Option(
+      `L${lap.lap_number} - ${formatLapTime(lap.lap_duration)}${fastestLabel}`,
+      String(lap.lap_number)
+    ));
+  }
+  select.disabled = false;
+}
+
+function enableMultiLapClick(row) {
+  const select = field(row, "lap");
+  const restoreLapScroll = () => {
+    if (!row.lapScrollAnchor) return;
+
+    const restore = () => {
+      select.scrollTop = row.lapScrollAnchor.laps;
+      comparisonList.scrollTop = row.lapScrollAnchor.comparisons;
+    };
+
+    // Chrome may scroll a multi-select to its first selected option after the
+    // mouse handler has completed. Restore after that native work as well as
+    // immediately so selecting a later lap does not jump back to an early lap.
+    restore();
+    queueMicrotask(restore);
+    setTimeout(restore, 0);
+    requestAnimationFrame(() => {
+      restore();
+      requestAnimationFrame(restore);
+    });
+  };
+
+  select.addEventListener("mousedown", (event) => {
+    const option = event.target;
+    if (option.tagName !== "OPTION" || option.disabled) return;
+
+    row.lapScrollAnchor = {
+      laps: select.scrollTop,
+      comparisons: comparisonList.scrollTop,
+    };
+    event.preventDefault();
+    const options = [...select.options].filter((item) => item.value);
+    const optionIndex = options.indexOf(option);
+    if (event.shiftKey && Number.isInteger(row.lastLapIndex)) {
+      const start = Math.min(row.lastLapIndex, optionIndex);
+      const end = Math.max(row.lastLapIndex, optionIndex);
+      options.forEach((item, index) => {
+        if (index >= start && index <= end) item.selected = true;
+      });
+    } else {
+      option.selected = !option.selected;
+      row.lastLapIndex = optionIndex;
+    }
+    select.focus({ preventScroll: true });
+    restoreLapScroll();
+  });
+
+  select.addEventListener("click", (event) => {
+    if (event.target.tagName !== "OPTION" || event.target.disabled) return;
+    event.preventDefault();
+    restoreLapScroll();
+  });
+}
+
+function consecutiveLapGroups(laps) {
+  const groups = [];
+  for (const lap of laps) {
+    const current = groups[groups.length - 1];
+    const previous = current?.[current.length - 1];
+    if (!previous || lap.lap_number !== previous.lap_number + 1) groups.push([lap]);
+    else current.push(lap);
+  }
+  return groups;
+}
+
 function field(row, name) {
   return row.element.querySelector(`[data-field="${name}"]`);
 }
@@ -205,7 +332,8 @@ function field(row, name) {
 function setRowLoading(row, loading) {
   row.element.querySelectorAll("select, button").forEach((control) => {
     if (control.tagName === "SELECT") {
-      control.disabled = loading || control.options.length <= 1;
+      const hasSelectableOption = [...control.options].some((option) => option.value);
+      control.disabled = loading || !hasSelectableOption;
       return;
     }
     control.disabled = loading || (control.classList.contains("remove-row") && state.rows.length === 1);
@@ -298,22 +426,8 @@ async function loadLaps(row) {
   try {
     const laps = timedLaps(await openf1("laps", { session_key: sessionKey, driver_number: driverNumber }));
     row.laps = laps;
-    const best = fastestLap(laps);
-    const options = [];
-    if (best) {
-      options.push({
-        value: String(best.lap_number),
-        label: `Fastest: L${best.lap_number} - ${formatLapTime(best.lap_duration)}`,
-      });
-    }
-    for (const lap of laps) {
-      if (best && lap.lap_number === best.lap_number) continue;
-      options.push({
-        value: String(lap.lap_number),
-        label: `L${lap.lap_number} - ${formatLapTime(lap.lap_duration)}`,
-      });
-    }
-    setOptions(field(row, "lap"), options, "Select lap");
+    row.lastLapIndex = null;
+    setLapOptions(field(row, "lap"), laps);
   } finally {
     setRowLoading(row, false);
     updateRemoveButtons();
@@ -337,6 +451,7 @@ async function addRow(copyFrom = state.rows[0]) {
     sessions: [],
     drivers: [],
     laps: [],
+    lastLapIndex: null,
   };
 
   const yearSelect = field(row, "year");
@@ -350,6 +465,7 @@ async function addRow(copyFrom = state.rows[0]) {
   field(row, "meeting").addEventListener("change", () => loadSessions(row));
   field(row, "session").addEventListener("change", () => loadDrivers(row));
   field(row, "driver").addEventListener("change", () => loadLaps(row));
+  enableMultiLapClick(row);
   element.querySelector(".remove-row").addEventListener("click", () => {
     state.rows = state.rows.filter((item) => item.id !== row.id);
     element.remove();
@@ -365,6 +481,7 @@ async function addRow(copyFrom = state.rows[0]) {
 }
 
 async function copyRowValues(target, source) {
+  const sourceLapNumbers = selectedLapNumbers(source).map(String);
   field(target, "year").value = field(source, "year").value;
   if (!field(target, "year").value) return;
   await loadMeetings(target);
@@ -377,17 +494,19 @@ async function copyRowValues(target, source) {
   field(target, "driver").value = field(source, "driver").value;
   if (!field(target, "driver").value) return;
   await loadLaps(target);
-  field(target, "lap").value = field(source, "lap").value;
+  [...field(target, "lap").options].forEach((option) => {
+    option.selected = sourceLapNumbers.includes(option.value);
+  });
 }
 
 function selectedObject(items, key, value) {
   return items.find((item) => String(item[key]) === String(value));
 }
 
-async function buildSeries(row, index, metrics, includeLocation) {
+async function buildSeries(row, index, metrics, includeLocation, selectedLapNumber = null, prefetched = null) {
   const sessionKey = field(row, "session").value;
   const driverNumber = field(row, "driver").value;
-  const lapNumber = field(row, "lap").value;
+  const lapNumber = selectedLapNumber ?? selectedLapNumbers(row)[0];
   const meeting = selectedObject(row.meetings, "meeting_key", field(row, "meeting").value);
   const session = selectedObject(row.sessions, "session_key", sessionKey);
   const driver = selectedObject(row.drivers, "driver_number", driverNumber);
@@ -398,7 +517,9 @@ async function buildSeries(row, index, metrics, includeLocation) {
 
   const lapStart = new Date(lap.date_start);
   const lapEnd = new Date(lapStart.getTime() + lap.lap_duration * 1000);
-  const traceRequest = metrics.length
+  const traceRequest = prefetched
+    ? Promise.resolve(prefetched.trace)
+    : metrics.length
     ? openf1("car_data", {
         session_key: sessionKey,
         driver_number: driverNumber,
@@ -406,7 +527,9 @@ async function buildSeries(row, index, metrics, includeLocation) {
         "date<": lapEnd.toISOString(),
       })
     : Promise.resolve([]);
-  const locationRequest = includeLocation
+  const locationRequest = prefetched
+    ? Promise.resolve(prefetched.location)
+    : includeLocation
     ? openf1("location", {
         session_key: sessionKey,
         driver_number: driverNumber,
@@ -414,23 +537,35 @@ async function buildSeries(row, index, metrics, includeLocation) {
         "date<": new Date(lapEnd.getTime() + 1500).toISOString(),
       })
     : Promise.resolve([]);
-  const [trace, location] = await Promise.all([traceRequest, locationRequest]);
+  const [groupTrace, groupLocation] = await Promise.all([traceRequest, locationRequest]);
+  const lapStartMs = lapStart.getTime();
+  const lapEndMs = lapEnd.getTime();
+  const trace = groupTrace.filter((point) => {
+    const timestamp = new Date(point.date).getTime();
+    return timestamp >= lapStartMs && timestamp <= lapEndMs;
+  });
+  const location = groupLocation.filter((point) => {
+    const timestamp = new Date(point.date).getTime();
+    return timestamp >= lapStartMs - 1500 && timestamp <= lapEndMs + 1500;
+  });
   const pointsByMetric = {};
-  if (metrics.length) {
-    for (const metric of metrics) {
-      pointsByMetric[metric.key] = trace
-        .filter((point) => point[metric.key] !== null && Number.isFinite(point[metric.key]))
-        .map((point) => ({
-          x: (new Date(point.date).getTime() - lapStart.getTime()) / 1000,
-          y: point[metric.key],
-        }))
-        .sort((a, b) => a.x - b.x);
-    }
-  }
-
-  const missingMetrics = metrics.filter((metric) => !pointsByMetric[metric.key].length);
-  if (metrics.length && missingMetrics.length === metrics.length) {
-    throw new Error(`No selected telemetry fields for ${driver.full_name}.`);
+  const rawSpeedPoints = trace
+    .filter((point) => point.speed !== null && Number.isFinite(point.speed))
+    .map((point) => ({
+      x: (new Date(point.date).getTime() - lapStart.getTime()) / 1000,
+      y: point.speed,
+    }))
+    .sort((a, b) => a.x - b.x);
+  for (const metric of metrics.filter((item) => !item.derived)) {
+    pointsByMetric[metric.key] = metric.key === "speed"
+      ? rawSpeedPoints
+      : trace
+          .filter((point) => point[metric.key] !== null && Number.isFinite(point[metric.key]))
+          .map((point) => ({
+            x: (new Date(point.date).getTime() - lapStart.getTime()) / 1000,
+            y: point[metric.key],
+          }))
+          .sort((a, b) => a.x - b.x);
   }
   const rawTrackPoints = location
     .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
@@ -441,6 +576,17 @@ async function buildSeries(row, index, metrics, includeLocation) {
     }));
   const trackPoints = normalizeTrackPoints(rawTrackPoints, lap.lap_duration);
   const progressPoints = buildProgressPoints(trackPoints);
+  if (metrics.some((metric) => metric.key === "longitudinal_acceleration")) {
+    pointsByMetric.longitudinal_acceleration = deriveLongitudinalAcceleration(rawSpeedPoints);
+  }
+  if (metrics.some((metric) => metric.key === "lateral_acceleration")) {
+    pointsByMetric.lateral_acceleration = deriveLateralAcceleration(rawSpeedPoints, trackPoints);
+  }
+
+  const missingMetrics = metrics.filter((metric) => !pointsByMetric[metric.key]?.length);
+  if (metrics.length && missingMetrics.length === metrics.length) {
+    throw new Error(`No selected telemetry fields for ${driver.full_name}.`);
+  }
   if (selectedAxisMode() === "track" && !progressPoints.length) {
     throw new Error(`No location data available to build a track-position axis for ${driver.full_name}.`);
   }
@@ -457,23 +603,90 @@ async function buildSeries(row, index, metrics, includeLocation) {
   };
 }
 
+async function buildRowSeries(row, metrics, includeLocation) {
+  const sessionKey = field(row, "session").value;
+  const driverNumber = field(row, "driver").value;
+  const selectedNumbers = selectedLapNumbers(row);
+  const laps = row.laps.filter((lap) => selectedNumbers.includes(lap.lap_number));
+  if (!sessionKey || !driverNumber || !laps.length) {
+    throw new Error("Select at least one lap in every selection before plotting.");
+  }
+
+  const dataByLap = new Map();
+  await Promise.all(consecutiveLapGroups(laps).map(async (group) => {
+    const firstStart = new Date(group[0].date_start);
+    const lastLap = group[group.length - 1];
+    const lastEnd = new Date(new Date(lastLap.date_start).getTime() + lastLap.lap_duration * 1000);
+    const traceRequest = metrics.length
+      ? openf1("car_data", {
+          session_key: sessionKey,
+          driver_number: driverNumber,
+          "date>": firstStart.toISOString(),
+          "date<": lastEnd.toISOString(),
+        })
+      : Promise.resolve([]);
+    const locationRequest = includeLocation
+      ? openf1("location", {
+          session_key: sessionKey,
+          driver_number: driverNumber,
+          "date>": new Date(firstStart.getTime() - 1500).toISOString(),
+          "date<": new Date(lastEnd.getTime() + 1500).toISOString(),
+        })
+      : Promise.resolve([]);
+    const [trace, location] = await Promise.all([traceRequest, locationRequest]);
+    group.forEach((lap) => dataByLap.set(lap.lap_number, { trace, location }));
+  }));
+
+  return Promise.all(laps.map((lap) => buildSeries(
+    row,
+    0,
+    metrics,
+    includeLocation,
+    lap.lap_number,
+    dataByLap.get(lap.lap_number)
+  )));
+}
+
+function seriesColor(index) {
+  if (index < SERIES_COLORS.length) return SERIES_COLORS[index];
+  return `hsl(${Math.round((index * 137.508) % 360)} 68% 42%)`;
+}
+
 async function plot() {
   const metrics = selectedMetrics();
   const includeMap = trackMapToggle.checked;
+  const includeGG = ggToggle.checked;
   updateAxisStatus();
-  if (!metrics.length && !includeMap) {
-    setStatus("Select at least one data field or the track map.", true);
+  if (!metrics.length && !includeMap && !includeGG) {
+    setStatus("Select at least one data field, the track map, or the G–G diagram.", true);
     return;
   }
   plotButton.disabled = true;
   emptyState.hidden = true;
   setStatus("Loading OpenF1 telemetry...");
   try {
-    const includeLocation = includeMap || state.rows.length > 1 || selectedAxisMode() === "track";
-    const series = await Promise.all(
-      state.rows.map((row, index) => buildSeries(row, index, metrics, includeLocation))
-    );
-    prepareSeriesData(series, metrics);
+    const selectedCount = state.rows.reduce((total, row) => total + selectedLapNumbers(row).length, 0);
+    const includeMapSpeed = includeMap && mapSpeedDeltaToggle.checked && selectedCount > 1;
+    let dataMetrics = includeMapSpeed && !metrics.some((metric) => metric.key === "speed")
+      ? [...metrics, SPEED_METRIC]
+      : metrics;
+    if (includeGG) {
+      for (const metric of [LONGITUDINAL_ACCELERATION_METRIC, LATERAL_ACCELERATION_METRIC]) {
+        if (!dataMetrics.some((item) => item.key === metric.key)) {
+          dataMetrics = [...dataMetrics, metric];
+        }
+      }
+    }
+    const includeLocation = includeMap
+      || includeGG
+      || selectedCount > 1
+      || selectedAxisMode() === "track"
+      || dataMetrics.some((metric) => metric.needsLocation);
+    const series = (await Promise.all(
+      state.rows.map((row) => buildRowSeries(row, dataMetrics, includeLocation))
+    )).flat();
+    series.forEach((item, index) => { item.color = seriesColor(index); });
+    prepareSeriesData(series, dataMetrics);
     state.plotted = series;
     state.metrics = metrics;
     state.timeBounds = chartBounds(series);
@@ -494,6 +707,7 @@ async function plot() {
     updateChartHeight(panelDefinitions(metrics).length);
     drawChart();
     drawTrackMap();
+    drawGGDiagram();
     setStatus(`Plotted ${series.length} comparison lap${series.length === 1 ? "" : "s"}.`);
   } catch (error) {
     console.error(error);
@@ -509,7 +723,210 @@ function updatePlotSubtitle() {
   if (!series.length) return;
   const metrics = state.metrics ?? selectedMetrics();
   const axisLabel = selectedAxisMode() === "track" ? "track-position" : "elapsed-time";
-  plotSubtitle.textContent = `${series.length} comparison lap${series.length === 1 ? "" : "s"}${metrics.length ? ` across ${metrics.length} data field${metrics.length === 1 ? "" : "s"}` : ""} on an ${axisLabel} axis${dataDeltaToggle.checked && series.length > 1 ? " with data deltas" : ""}${trackMapToggle.checked ? " and track map" : ""}.`;
+  const mapDescription = trackMapToggle.checked
+    ? mapSpeedDeltaToggle.checked && series.length > 1 ? " and speed-advantage track map" : " and track map"
+    : "";
+  const ggDescription = ggToggle.checked ? " and linked G–G diagram" : "";
+  plotSubtitle.textContent = `${series.length} comparison lap${series.length === 1 ? "" : "s"}${metrics.length ? ` across ${metrics.length} data field${metrics.length === 1 ? "" : "s"}` : ""} on an ${axisLabel} axis${dataDeltaToggle.checked && series.length > 1 ? " with data deltas" : ""}${mapDescription}${ggDescription}.`;
+}
+
+function ggPointsForSeries(series) {
+  const lateral = series.pointsByMetric.lateral_acceleration ?? [];
+  const longitudinal = series.pointsByMetric.longitudinal_acceleration ?? [];
+  if (!lateral.length || !longitudinal.length) return [];
+  return lateral.map((point) => {
+    const longitudinalG = interpolateField(longitudinal, "x", point.x, "y");
+    return Number.isFinite(longitudinalG)
+      ? { elapsed: point.x, x: point.y, y: longitudinalG }
+      : null;
+  }).filter((point) => point && Math.abs(point.x) <= MAX_ACCELERATION_MPS2 && Math.abs(point.y) <= MAX_ACCELERATION_MPS2);
+}
+
+function ggPointAtCursor(series, cursor) {
+  if (!cursor) return null;
+  const elapsed = elapsedForCursor(series, cursor);
+  if (!Number.isFinite(elapsed)) return null;
+  const lateralAcceleration = metricValueAtElapsed(series, LATERAL_ACCELERATION_METRIC, elapsed);
+  const longitudinalAcceleration = metricValueAtElapsed(series, LONGITUDINAL_ACCELERATION_METRIC, elapsed);
+  if (!Number.isFinite(lateralAcceleration) || !Number.isFinite(longitudinalAcceleration)) return null;
+  return { elapsed, x: lateralAcceleration, y: longitudinalAcceleration };
+}
+
+function percentile(values, fraction) {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const position = Math.max(0, Math.min(sorted.length - 1, (sorted.length - 1) * fraction));
+  const lower = Math.floor(position);
+  const upper = Math.ceil(position);
+  const ratio = position - lower;
+  return sorted[lower] + (sorted[upper] - sorted[lower]) * ratio;
+}
+
+function resizeGGCanvas() {
+  const rect = ggCanvas.getBoundingClientRect();
+  const ratio = window.devicePixelRatio || 1;
+  const targetWidth = Math.max(1, Math.floor(rect.width * ratio));
+  const targetHeight = Math.max(1, Math.floor(rect.height * ratio));
+  if (ggCanvas.width !== targetWidth || ggCanvas.height !== targetHeight) {
+    ggCanvas.width = targetWidth;
+    ggCanvas.height = targetHeight;
+  }
+  ggCtx.setTransform(ratio, 0, 0, ratio, 0, 0);
+}
+
+function ggExtent(points) {
+  const magnitudes = points.flatMap((point) => [Math.abs(point.x), Math.abs(point.y)]);
+  const robustMaximum = percentile(magnitudes, 0.995);
+  return Math.max(10, Math.ceil((robustMaximum * 1.15) / 5) * 5);
+}
+
+function drawGGCursor(cursor, pinned, layout) {
+  if (!cursor) return;
+  const { left, top, size, extent, xScale, yScale } = layout;
+  const points = state.plotted
+    .map((series) => ({ series, point: ggPointAtCursor(series, cursor) }))
+    .filter((item) => item.point);
+  if (!points.length) return;
+
+  ggCtx.save();
+  ggCtx.beginPath();
+  ggCtx.rect(left, top, size, size);
+  ggCtx.clip();
+  points.forEach(({ series, point }, index) => {
+    if (Math.abs(point.x) > extent || Math.abs(point.y) > extent) return;
+    const x = xScale(point.x);
+    const y = yScale(point.y);
+    if (index === 0) {
+      ggCtx.strokeStyle = pinned ? "rgba(225, 6, 0, 0.48)" : "rgba(39, 39, 39, 0.28)";
+      ggCtx.lineWidth = 1;
+      ggCtx.setLineDash([4, 4]);
+      ggCtx.beginPath();
+      ggCtx.moveTo(xScale(0), y);
+      ggCtx.lineTo(x, y);
+      ggCtx.lineTo(x, yScale(0));
+      ggCtx.stroke();
+      ggCtx.setLineDash([]);
+    }
+    ggCtx.fillStyle = "#fffdf9";
+    ggCtx.beginPath();
+    ggCtx.arc(x, y, pinned ? 9 : 8, 0, Math.PI * 2);
+    ggCtx.fill();
+    ggCtx.strokeStyle = series.color;
+    ggCtx.lineWidth = pinned ? 3 : 2;
+    ggCtx.beginPath();
+    ggCtx.arc(x, y, pinned ? 6 : 5, 0, Math.PI * 2);
+    ggCtx.fillStyle = series.color;
+    ggCtx.fill();
+    ggCtx.stroke();
+  });
+  ggCtx.restore();
+}
+
+function ggDrivingState(point) {
+  if (Math.abs(point.x) < 3) {
+    if (point.y < -3) return "straight-line braking";
+    if (point.y > 3) return "straight-line acceleration";
+    return "straight / low combined load";
+  }
+  if (point.y < -3) return "trail braking / combined load";
+  if (point.y > 3) return "corner exit / combined load";
+  return "cornering";
+}
+
+function drawGGDiagram() {
+  ggPanel.hidden = !ggToggle.checked || !state.plotted.length;
+  if (ggPanel.hidden) return;
+
+  resizeGGCanvas();
+  const width = ggCanvas.clientWidth;
+  const height = ggCanvas.clientHeight;
+  ggCtx.clearRect(0, 0, width, height);
+  ggCtx.fillStyle = "#fffdf9";
+  ggCtx.fillRect(0, 0, width, height);
+
+  const seriesPoints = state.plotted.map((series) => ({ series, points: ggPointsForSeries(series) }));
+  const allPoints = seriesPoints.flatMap((item) => item.points);
+  if (!allPoints.length) {
+    ggStatus.textContent = "No paired acceleration samples are available for this lap";
+    ggCtx.fillStyle = "#68625d";
+    ggCtx.font = "14px system-ui, sans-serif";
+    ggCtx.textAlign = "center";
+    ggCtx.fillText("No G–G data", width / 2, height / 2);
+    return;
+  }
+
+  const extent = ggExtent(allPoints);
+  const availableWidth = Math.max(1, width - GG_PAD.left - GG_PAD.right);
+  const availableHeight = Math.max(1, height - GG_PAD.top - GG_PAD.bottom);
+  const size = Math.min(availableWidth, availableHeight);
+  const left = GG_PAD.left + (availableWidth - size) / 2;
+  const top = GG_PAD.top + (availableHeight - size) / 2;
+  const xScale = (value) => left + ((value + extent) / (2 * extent)) * size;
+  const yScale = (value) => top + (1 - (value + extent) / (2 * extent)) * size;
+  const tickStep = extent <= 10 ? 2 : extent <= 25 ? 5 : 10;
+
+  ggCtx.font = "11px system-ui, sans-serif";
+  ggCtx.textAlign = "center";
+  ggCtx.textBaseline = "top";
+  for (let value = -extent; value <= extent + 1e-9; value += tickStep) {
+    const x = xScale(value);
+    const y = yScale(value);
+    ggCtx.strokeStyle = Math.abs(value) < 1e-9 ? "#8b837c" : "#e3ddd5";
+    ggCtx.lineWidth = Math.abs(value) < 1e-9 ? 1.3 : 1;
+    ggCtx.beginPath();
+    ggCtx.moveTo(x, top);
+    ggCtx.lineTo(x, top + size);
+    ggCtx.stroke();
+    ggCtx.beginPath();
+    ggCtx.moveTo(left, y);
+    ggCtx.lineTo(left + size, y);
+    ggCtx.stroke();
+    ggCtx.fillStyle = "#68625d";
+    const label = Math.abs(value) < 1e-9 ? "0" : value.toFixed(0);
+    ggCtx.fillText(label, x, top + size + 7);
+    ggCtx.textAlign = "right";
+    ggCtx.textBaseline = "middle";
+    ggCtx.fillText(label, left - 9, y);
+    ggCtx.textAlign = "center";
+    ggCtx.textBaseline = "top";
+  }
+
+  ggCtx.fillStyle = "#171717";
+  ggCtx.font = "700 12px system-ui, sans-serif";
+  ggCtx.fillText("Lateral acceleration, aᵧ (m/s²)", left + size / 2, height - 21);
+  ggCtx.save();
+  ggCtx.translate(17, top + size / 2);
+  ggCtx.rotate(-Math.PI / 2);
+  ggCtx.fillText("Longitudinal acceleration, aₓ (m/s²)", 0, 0);
+  ggCtx.restore();
+
+  ggCtx.save();
+  ggCtx.beginPath();
+  ggCtx.rect(left, top, size, size);
+  ggCtx.clip();
+  for (const item of seriesPoints) {
+    ggCtx.fillStyle = item.series.color;
+    ggCtx.globalAlpha = state.plotted.length === 1 ? 0.42 : 0.3;
+    for (const point of item.points) {
+      if (Math.abs(point.x) > extent || Math.abs(point.y) > extent) continue;
+      ggCtx.beginPath();
+      ggCtx.arc(xScale(point.x), yScale(point.y), 2.15, 0, Math.PI * 2);
+      ggCtx.fill();
+    }
+  }
+  ggCtx.restore();
+
+  const layout = { left, top, size, extent, xScale, yScale };
+  drawGGCursor(state.cursor, true, layout);
+  drawGGCursor(state.hover, false, layout);
+
+  const activeCursor = state.hover || state.cursor;
+  const activePoint = ggPointAtCursor(state.plotted[0], activeCursor);
+  if (activePoint) {
+    ggStatus.textContent = `${driverShortName(state.plotted[0])} · ${activePoint.elapsed.toFixed(2)}s · aᵧ ${activePoint.x.toFixed(2)} m/s² · aₓ ${activePoint.y.toFixed(2)} m/s² · ${ggDrivingState(activePoint)}`;
+  } else {
+    ggStatus.textContent = `${allPoints.length} measured acceleration samples · hover the track map to highlight one`;
+  }
 }
 
 function resizeCanvas() {
@@ -526,16 +943,12 @@ function resizeCanvas() {
 
 function updateChartHeight(panelCount) {
   const wrap = canvas.closest(".canvas-wrap");
-  wrap.style.minHeight = "";
   wrap.style.height = "";
 
   const minimumHeight = CHART_PAD.top + CHART_PAD.bottom
     + panelCount * MIN_PANEL_HEIGHT
     + Math.max(0, panelCount - 1) * PANEL_GAP;
-  if (wrap.getBoundingClientRect().height >= minimumHeight) return;
-
-  wrap.style.minHeight = `${minimumHeight}px`;
-  wrap.style.height = `${minimumHeight}px`;
+  wrap.style.minHeight = `${Math.max(420, minimumHeight)}px`;
 }
 
 function chartBounds(series) {
@@ -669,18 +1082,23 @@ function clearMarkers() {
   updateDeltaReadout(finalCursor());
   drawChart();
   drawTrackMap();
+  drawGGDiagram();
 }
 
 function metricBounds(series, metric) {
   const points = series.flatMap((item) => item.pointsByMetric[metric.key] ?? []);
   const values = points.map((point) => point.y);
   if (!values.length) {
-    return { minY: 0, maxY: 1 };
+    return metric.symmetric ? { minY: -1, maxY: 1 } : { minY: 0, maxY: 1 };
   }
   const minY = Math.min(...values);
   const maxY = Math.max(...values);
   if (Number.isFinite(metric.min) && Number.isFinite(metric.max)) {
     return { minY: metric.min, maxY: metric.max };
+  }
+  if (metric.symmetric) {
+    const extent = Math.max(0.25, Math.abs(minY), Math.abs(maxY)) * 1.12;
+    return { minY: -extent, maxY: extent };
   }
   const padY = Math.max(metric.key === "n_gear" ? 1 : 8, (maxY - minY) * 0.12);
   return {
@@ -896,6 +1314,91 @@ function trackBounds(series) {
   };
 }
 
+function mapPointAtProgress(series, progress) {
+  const elapsed = elapsedAtProgress(series, progress);
+  return Number.isFinite(elapsed)
+    ? interpolatedTrackPoint(series.trackPoints ?? [], elapsed)
+    : null;
+}
+
+function mapSpeedAdvantageSegments(reference, comparison, segmentCount = 240) {
+  const referenceSpeed = metricPointsForAxis(reference, SPEED_METRIC, "track");
+  const comparisonSpeed = metricPointsForAxis(comparison, SPEED_METRIC, "track");
+  if (!referenceSpeed.length || !comparisonSpeed.length || !reference.trackPoints?.length) return [];
+
+  const segments = [];
+  let from = mapPointAtProgress(reference, 0);
+  for (let index = 0; index < segmentCount; index += 1) {
+    const startProgress = index / segmentCount;
+    const endProgress = (index + 1) / segmentCount;
+    const midpoint = ((startProgress + endProgress) / 2) * 100;
+    const to = mapPointAtProgress(reference, endProgress);
+    const referencePoint = interpolatePlotPoint(referenceSpeed, midpoint);
+    const comparisonPoint = interpolatePlotPoint(comparisonSpeed, midpoint);
+    if (from && to && referencePoint && comparisonPoint) {
+      const delta = comparisonPoint.y - referencePoint.y;
+      const winner = Math.abs(delta) <= MAP_SPEED_NEUTRAL_THRESHOLD
+        ? "neutral"
+        : delta > 0 ? "comparison" : "reference";
+      segments.push({ from, to, delta, winner });
+    }
+    from = to;
+  }
+  return segments;
+}
+
+function driverShortName(series) {
+  return series.driver.name_acronym || series.driver.last_name;
+}
+
+function appendMapSpeedKey(color, text) {
+  const key = document.createElement("span");
+  key.className = "map-speed-key";
+  const swatch = document.createElement("span");
+  swatch.className = "map-speed-swatch";
+  swatch.style.background = color;
+  const label = document.createElement("span");
+  label.textContent = text;
+  key.append(swatch, label);
+  mapSpeedLegend.append(key);
+}
+
+function updateMapSpeedLegend(enabled, available) {
+  mapSpeedLegend.innerHTML = "";
+  mapSpeedLegend.hidden = !enabled;
+  if (!enabled) return;
+  if (!available) {
+    mapSpeedLegend.textContent = "Speed comparison unavailable for these laps";
+    return;
+  }
+
+  const [reference, comparison] = state.plotted;
+  appendMapSpeedKey(reference.color, `${driverShortName(reference)} faster`);
+  appendMapSpeedKey(comparison.color, `${driverShortName(comparison)} faster`);
+  appendMapSpeedKey(MAP_SPEED_NEUTRAL_COLOR, `Within ${MAP_SPEED_NEUTRAL_THRESHOLD} km/h`);
+  if (state.plotted.length > 2) {
+    const note = document.createElement("span");
+    note.className = "map-speed-key";
+    note.textContent = "Map compares the first two laps";
+    mapSpeedLegend.append(note);
+  }
+}
+
+function drawMapSpeedSegments(segments, reference, comparison, xScale, yScale) {
+  mapCtx.lineWidth = 6.5;
+  mapCtx.lineJoin = "round";
+  mapCtx.lineCap = "round";
+  for (const segment of segments) {
+    mapCtx.strokeStyle = segment.winner === "reference"
+      ? reference.color
+      : segment.winner === "comparison" ? comparison.color : MAP_SPEED_NEUTRAL_COLOR;
+    mapCtx.beginPath();
+    mapCtx.moveTo(xScale(segment.from.x), yScale(segment.from.y));
+    mapCtx.lineTo(xScale(segment.to.x), yScale(segment.to.y));
+    mapCtx.stroke();
+  }
+}
+
 function drawTrackMap() {
   const includeMap = trackMapToggle.checked;
   mapPanel.hidden = !includeMap || !state.plotted.length;
@@ -918,14 +1421,29 @@ function drawTrackMap() {
   }
   const { xScale, yScale } = layout;
 
-  for (const series of state.plotted) {
-    const points = series.trackPoints ?? [];
-    if (!points.length) continue;
-    mapCtx.strokeStyle = series.color;
-    mapCtx.lineWidth = 3;
+  const showSpeedAdvantage = mapSpeedDeltaToggle.checked && state.plotted.length > 1;
+  const speedSegments = showSpeedAdvantage
+    ? mapSpeedAdvantageSegments(state.plotted[0], state.plotted[1])
+    : [];
+  updateMapSpeedLegend(showSpeedAdvantage, speedSegments.length > 0);
+
+  if (speedSegments.length) {
+    mapCtx.strokeStyle = "#d8d4ce";
+    mapCtx.lineWidth = 10;
     mapCtx.lineJoin = "round";
     mapCtx.lineCap = "round";
-    drawSmoothPath(mapCtx, points, xScale, yScale);
+    drawSmoothPath(mapCtx, state.plotted[0].trackPoints, xScale, yScale);
+    drawMapSpeedSegments(speedSegments, state.plotted[0], state.plotted[1], xScale, yScale);
+  } else {
+    for (const series of state.plotted) {
+      const points = series.trackPoints ?? [];
+      if (!points.length) continue;
+      mapCtx.strokeStyle = series.color;
+      mapCtx.lineWidth = 3;
+      mapCtx.lineJoin = "round";
+      mapCtx.lineCap = "round";
+      drawSmoothPath(mapCtx, points, xScale, yScale);
+    }
   }
 
   if (state.cursor) drawMapCursor(state.cursor, xScale, yScale, true);
@@ -1023,6 +1541,8 @@ function deltaMeaning(metric) {
     : "Comparison";
   const phrase = {
     speed: "faster than",
+    longitudinal_acceleration: "higher longitudinal acceleration than",
+    lateral_acceleration: "higher signed lateral acceleration than",
     throttle: "more throttle than",
     brake: "more braking than",
     rpm: "more RPM than",
@@ -1213,6 +1733,76 @@ function normalizeTrackPoints(points, lapDuration) {
   return [start, ...withinLap, end].filter(Boolean);
 }
 
+function deriveLongitudinalAcceleration(speedPoints, windowRadius = 2) {
+  if (speedPoints.length < 3) return [];
+  const result = [];
+  for (let index = 0; index < speedPoints.length; index += 1) {
+    const samples = speedPoints.slice(
+      Math.max(0, index - windowRadius),
+      Math.min(speedPoints.length, index + windowRadius + 1)
+    );
+    if (samples.length < 3) continue;
+    const meanTime = samples.reduce((sum, point) => sum + point.x, 0) / samples.length;
+    const meanSpeed = samples.reduce((sum, point) => sum + point.y / 3.6, 0) / samples.length;
+    let covariance = 0;
+    let timeVariance = 0;
+    for (const point of samples) {
+      const timeOffset = point.x - meanTime;
+      covariance += timeOffset * (point.y / 3.6 - meanSpeed);
+      timeVariance += timeOffset * timeOffset;
+    }
+    if (timeVariance <= 0) continue;
+    const acceleration = covariance / timeVariance;
+    if (Number.isFinite(acceleration) && Math.abs(acceleration) <= MAX_ACCELERATION_MPS2) {
+      result.push({ x: speedPoints[index].x, y: acceleration });
+    }
+  }
+  return result;
+}
+
+function smoothedTrackPoints(points, radius = 2) {
+  return points.map((point, index) => {
+    const samples = points.slice(
+      Math.max(0, index - radius),
+      Math.min(points.length, index + radius + 1)
+    );
+    return {
+      elapsed: point.elapsed,
+      x: samples.reduce((sum, sample) => sum + sample.x, 0) / samples.length,
+      y: samples.reduce((sum, sample) => sum + sample.y, 0) / samples.length,
+    };
+  });
+}
+
+function wrappedAngle(angle) {
+  let result = angle;
+  while (result > Math.PI) result -= Math.PI * 2;
+  while (result < -Math.PI) result += Math.PI * 2;
+  return result;
+}
+
+function deriveLateralAcceleration(speedPoints, trackPoints, windowRadius = 2) {
+  if (speedPoints.length < 3 || trackPoints.length < windowRadius * 2 + 1) return [];
+  const smoothed = smoothedTrackPoints(trackPoints, 2);
+  const result = [];
+  for (let index = windowRadius; index < smoothed.length - windowRadius; index += 1) {
+    const previous = smoothed[index - windowRadius];
+    const current = smoothed[index];
+    const next = smoothed[index + windowRadius];
+    const incomingHeading = Math.atan2(current.y - previous.y, current.x - previous.x);
+    const outgoingHeading = Math.atan2(next.y - current.y, next.x - current.x);
+    const headingTime = (next.elapsed - previous.elapsed) / 2;
+    const speedKmh = interpolateField(speedPoints, "x", current.elapsed, "y");
+    if (!(headingTime > 0) || !Number.isFinite(speedKmh)) continue;
+    const turnRate = wrappedAngle(outgoingHeading - incomingHeading) / headingTime;
+    const acceleration = (speedKmh / 3.6) * turnRate;
+    if (Number.isFinite(acceleration) && Math.abs(acceleration) <= MAX_ACCELERATION_MPS2) {
+      result.push({ x: current.elapsed, y: acceleration });
+    }
+  }
+  return result;
+}
+
 function buildProgressPoints(points) {
   if (!points.length) return [];
   let cumulative = 0;
@@ -1337,21 +1927,32 @@ function drawMapCursor(cursor, xScale, yScale, pinned) {
     ? interpolatedTrackPoint(reference.trackPoints ?? [], sharedElapsed)
     : null;
 
-  state.plotted.forEach((series, index) => {
-    const point = sharedPoint ?? interpolatedTrackPoint(series.trackPoints ?? [], elapsedForCursor(series, cursor));
-    if (!point) return;
-    const x = xScale(point.x);
-    const y = yScale(point.y);
-    const baseRadius = pinned ? 7 : 5;
-    const radius = sharedPoint ? baseRadius + (state.plotted.length - index - 1) * 3 : baseRadius;
-    mapCtx.fillStyle = "#fffdf9";
-    mapCtx.strokeStyle = series.color;
-    mapCtx.lineWidth = pinned ? 3 : 2;
+  if (sharedPoint) {
+    const x = xScale(sharedPoint.x);
+    const y = yScale(sharedPoint.y);
+    mapCtx.fillStyle = reference.color;
+    mapCtx.strokeStyle = "#fffdf9";
+    mapCtx.lineWidth = 2;
     mapCtx.beginPath();
-    mapCtx.arc(x, y, radius, 0, Math.PI * 2);
+    mapCtx.arc(x, y, pinned ? 7 : 5, 0, Math.PI * 2);
     mapCtx.fill();
     mapCtx.stroke();
-  });
+  } else {
+    state.plotted.forEach((series) => {
+      const point = interpolatedTrackPoint(series.trackPoints ?? [], elapsedForCursor(series, cursor));
+      if (!point) return;
+      const x = xScale(point.x);
+      const y = yScale(point.y);
+      const radius = pinned ? 7 : 5;
+      mapCtx.fillStyle = "#fffdf9";
+      mapCtx.strokeStyle = series.color;
+      mapCtx.lineWidth = pinned ? 3 : 2;
+      mapCtx.beginPath();
+      mapCtx.arc(x, y, radius, 0, Math.PI * 2);
+      mapCtx.fill();
+      mapCtx.stroke();
+    });
+  }
 
   if (pinned) {
     mapCtx.fillStyle = "#272727";
@@ -1380,7 +1981,7 @@ function formatDelta(delta) {
 }
 
 function formatMetricValue(metric, value) {
-  const digits = metric.key === "throttle" ? 1 : 0;
+  const digits = metric.unit === "m/s²" ? 2 : metric.key === "throttle" ? 1 : 0;
   const formatted = value.toFixed(digits);
   return metric.unit === "%" ? `${formatted}%` : `${formatted} ${metric.unit}`;
 }
@@ -1613,6 +2214,7 @@ function scheduleInteractionRender(cursor = state.cursor || finalCursor()) {
     updateDeltaReadout(state.pendingCursor);
     drawChart();
     drawTrackMap();
+    drawGGDiagram();
   });
 }
 
@@ -1658,6 +2260,7 @@ window.addEventListener("resize", () => {
   updateChartHeight(panelDefinitions(state.metrics ?? selectedMetrics()).length);
   drawChart();
   drawTrackMap();
+  drawGGDiagram();
 });
 metricOptions.addEventListener("change", () => {
   const metrics = selectedMetrics();
@@ -1667,17 +2270,49 @@ metricOptions.addEventListener("change", () => {
     : metrics.length > 1 ? `${metrics.length} telemetry traces` : "Telemetry trace";
 });
 trackMapToggle.addEventListener("change", () => {
+  mapSpeedDeltaToggle.disabled = !trackMapToggle.checked;
   if (!state.plotted.length) {
     drawTrackMap();
     return;
   }
   const hasTrackData = state.plotted.every((series) => series.trackPoints?.length);
-  if (!trackMapToggle.checked || hasTrackData) {
+  const hasSpeedData = !mapSpeedDeltaToggle.checked
+    || state.plotted.length < 2
+    || state.plotted.every((series) => series.pointsByMetric.speed?.length);
+  if (!trackMapToggle.checked || (hasTrackData && hasSpeedData)) {
     updatePlotSubtitle();
     drawTrackMap();
     return;
   }
   plot();
+});
+ggToggle.addEventListener("change", () => {
+  if (!state.plotted.length) {
+    drawGGDiagram();
+    return;
+  }
+  const hasAccelerationData = state.plotted.every((series) =>
+    series.pointsByMetric.longitudinal_acceleration?.length && series.pointsByMetric.lateral_acceleration?.length
+  );
+  if (ggToggle.checked && !hasAccelerationData) {
+    plot();
+    return;
+  }
+  updatePlotSubtitle();
+  drawGGDiagram();
+});
+mapSpeedDeltaToggle.addEventListener("change", () => {
+  if (!state.plotted.length || !trackMapToggle.checked) {
+    drawTrackMap();
+    return;
+  }
+  const hasSpeedData = state.plotted.every((series) => series.pointsByMetric.speed?.length);
+  if (mapSpeedDeltaToggle.checked && state.plotted.length > 1 && !hasSpeedData) {
+    plot();
+    return;
+  }
+  updatePlotSubtitle();
+  drawTrackMap();
 });
 dataDeltaToggle.addEventListener("change", () => {
   if (state.plotted.length) {
@@ -1706,13 +2341,16 @@ axisModeInputs.forEach((input) => {
         drawChart();
       }
       drawTrackMap();
+      drawGGDiagram();
       return;
     }
 
     plot();
   });
 });
-addButton.addEventListener("click", () => addRow());
+[addButton, addButtonBottom].filter(Boolean).forEach((button) => {
+  button.addEventListener("click", () => addRow());
+});
 plotButton.addEventListener("click", plot);
 zoomInButton.addEventListener("click", () => zoomBy(0.72));
 zoomOutButton.addEventListener("click", () => zoomBy(1.38));
@@ -1720,6 +2358,7 @@ resetZoomButton.addEventListener("click", resetZoom);
 clearMarkersButton.addEventListener("click", clearMarkers);
 
 initMetricOptions();
+mapSpeedDeltaToggle.disabled = !trackMapToggle.checked;
 updateMarkerControls();
 updateZoomControls();
 updateAxisStatus();

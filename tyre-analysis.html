@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>OpenF1 Tyre Performance Lab</title>
+    <link rel="stylesheet" href="tyre-analysis.css?v=20260921-3">
+  </head>
+  <body>
+    <header class="lab-header">
+      <div>
+        <p class="eyebrow">OpenF1 telemetry study</p>
+        <h1>Tyre Performance Lab</h1>
+      </div>
+      <a class="back-link" href="index.html">← Lap trace dashboard</a>
+    </header>
+
+    <main>
+      <section class="study-heading" aria-labelledby="study-title">
+        <div>
+          <h2 id="study-title">Loading race analysis…</h2>
+          <p id="study-subtitle">Joining laps, stints, car data, and location data.</p>
+        </div>
+        <div class="equation-block" aria-label="Fitted ellipse equation">
+          <span>Observed envelope</span>
+          <strong>(a<sub>x</sub> / A<sub>x</sub>)² + (a<sub>y</sub> / A<sub>y</sub>)² ≤ 1</strong>
+        </div>
+      </section>
+
+      <section class="analysis-controls" aria-label="Choose tyre analysis data">
+        <div class="selection-grid">
+          <label>
+            <span>Year</span>
+            <select id="year-select" aria-label="Choose year"></select>
+          </label>
+          <label>
+            <span>Grand Prix</span>
+            <select id="meeting-select" aria-label="Choose Grand Prix"></select>
+          </label>
+          <label>
+            <span>Session</span>
+            <select id="session-select" aria-label="Choose session"></select>
+          </label>
+          <label>
+            <span>Driver</span>
+            <select id="driver-select" aria-label="Choose driver"></select>
+          </label>
+          <div class="analysis-actions">
+            <button id="analyse-button" type="button">Load as base</button>
+            <button id="add-comparison-button" type="button">+ Add comparison</button>
+          </div>
+        </div>
+        <div class="selection-footer">
+          <p id="session-hint">Race, sprint, and practice sessions are listed first. Qualifying is separated as a short-run study.</p>
+          <p id="load-status" class="load-status" role="status"></p>
+        </div>
+        <div class="comparison-workspace" aria-label="Loaded comparison selections">
+          <div class="comparison-heading">
+            <strong>Loaded selections</strong>
+            <span>Up to four. Choose a stint on each card for the ellipse overlay.</span>
+          </div>
+          <div id="comparison-list" class="comparison-list"></div>
+          <p id="comparison-rule" class="comparison-rule"></p>
+        </div>
+      </section>
+
+      <section class="chart-panel" aria-labelledby="lap-time-title">
+        <div class="panel-heading">
+          <div>
+            <p class="panel-number">01</p>
+            <h2 id="lap-time-title">Lap time and tyre stints</h2>
+          </div>
+          <div class="panel-tools">
+            <label class="view-control lap-axis-control">
+              <span>Horizontal axis</span>
+              <select id="lap-axis-select" aria-label="Choose lap-time horizontal axis">
+                <option value="session">Session lap</option>
+                <option value="tyre-age">Tyre age</option>
+              </select>
+            </label>
+            <p class="panel-copy">Only same-circuit, same-session selections are overlaid.</p>
+          </div>
+        </div>
+        <div id="stint-legend" class="stint-legend" aria-label="Tyre stints"></div>
+        <div class="canvas-shell lap-time-shell">
+          <canvas id="lap-time-canvas" role="img" aria-label="Lap time by race lap, marked by tyre stint and tyre changes">
+            Lap time by race lap with tyre stints and pit-stop changes.
+          </canvas>
+          <div id="lap-tooltip" class="chart-tooltip" hidden></div>
+        </div>
+        <div class="excluded-panel">
+          <strong>Excluded from plot scale</strong>
+          <div id="excluded-laps" class="excluded-laps"></div>
+        </div>
+      </section>
+
+      <section class="chart-panel" aria-labelledby="ellipse-title">
+        <div class="panel-heading envelope-heading">
+          <div>
+            <p class="panel-number">02</p>
+            <h2 id="ellipse-title">How the acceleration ellipse changes</h2>
+          </div>
+          <div class="envelope-controls">
+            <label class="view-control">
+              <span>Envelope view</span>
+              <select id="stint-select" aria-label="Choose a stint or comparison view"></select>
+            </label>
+            <label class="view-control lap-choice">
+              <span>Highlighted lap</span>
+              <select id="lap-select" aria-label="Choose a lap to highlight"></select>
+            </label>
+          </div>
+        </div>
+        <div id="ellipse-readout" class="ellipse-readout" aria-live="polite">
+          Select a clean lap in the first chart.
+        </div>
+        <div class="canvas-shell ellipse-shell">
+          <canvas id="ellipse-canvas" role="img" aria-label="Lap-by-lap fitted acceleration ellipses">
+            Fitted acceleration ellipses with lateral acceleration on the horizontal axis and longitudinal acceleration on the vertical axis.
+          </canvas>
+        </div>
+      </section>
+
+      <section class="method-note" aria-labelledby="method-title">
+        <h2 id="method-title">Interpretation</h2>
+        <p><strong>A<sub>x</sub></strong> is the fitted longitudinal semi-axis and <strong>A<sub>y</sub></strong> is the fitted lateral semi-axis. Each lap uses the minimum-area, axis-aligned ellipse that contains at least 95% of its derived acceleration samples. Standing starts, pit laps, out laps, and statistically slow laps are listed separately and do not set the chart scale or stint trend.</p>
+        <p>This is an observed vehicle-usage envelope, not a direct measurement of tyre friction. Fuel load, aerodynamic load, traffic, track evolution, weather, and driver input are still mixed into the result. OpenF1 supplies event-relative labels; this lab joins a reviewed weekend allocation catalogue to show the corresponding C1–C6 construction when known. <span id="allocation-source-note"></span></p>
+      </section>
+    </main>
+
+    <script src="tyre-analysis.js?v=20260921-5"></script>
+  </body>
+</html>

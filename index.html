@@ -4,13 +4,14 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>OpenF1 Lap Trace Compare</title>
-    <link rel="stylesheet" href="styles.css?v=20260721-3">
+    <link rel="stylesheet" href="styles.css?v=20260918-4">
   </head>
   <body>
     <header class="app-header">
       <div>
         <p class="eyebrow">OpenF1 telemetry</p>
         <h1>Lap Trace Compare</h1>
+        <a class="analysis-page-link" href="tyre-analysis.html">Open tyre performance lab →</a>
       </div>
       <div class="display-controls" aria-label="Plot settings">
         <fieldset class="toolbar-group telemetry-group">
@@ -41,6 +42,14 @@
               <input id="data-delta-toggle" type="checkbox" checked>
               <span>Data delta</span>
             </label>
+            <label class="metric-pill">
+              <input id="map-speed-delta-toggle" type="checkbox" checked>
+              <span>Map speed advantage</span>
+            </label>
+            <label class="metric-pill">
+              <input id="gg-toggle" type="checkbox" checked>
+              <span>G–G diagram</span>
+            </label>
           </div>
         </fieldset>
       </div>
@@ -50,9 +59,12 @@
       <section class="controls-shell" aria-label="Trace selections">
         <div class="section-title">
           <h2>Selections</h2>
-          <button id="add-comparison" type="button">+ Add comparison</button>
+          <button id="add-comparison" class="add-comparison-button" type="button">+ Add comparison</button>
         </div>
         <div id="comparison-list" class="comparison-list"></div>
+        <div class="controls-footer">
+          <button id="add-comparison-bottom" class="add-comparison-button" type="button">+ Add comparison</button>
+        </div>
       </section>
 
       <section class="plot-shell" aria-label="Comparison chart">
@@ -82,11 +94,24 @@
               <div>
                 <h2>Track map</h2>
                 <p id="marker-status">No markers</p>
+                <div id="map-speed-legend" class="map-speed-legend" hidden></div>
               </div>
               <button id="clear-markers" class="secondary-button" type="button" disabled>Clear markers</button>
             </div>
             <div class="map-canvas-wrap">
-              <canvas id="track-map-canvas" role="img" aria-label="Track map with car positions and selection markers"></canvas>
+              <canvas id="track-map-canvas" role="img" aria-label="Track map colored by speed advantage, with car positions and selection markers"></canvas>
+            </div>
+          </div>
+          <div id="gg-panel" class="gg-shell" hidden>
+            <div class="gg-header">
+              <div class="gg-title-row">
+                <h2>G–G diagram</h2>
+                <span class="gg-note">Vehicle acceleration—not a tyre limit</span>
+              </div>
+              <p id="gg-status">Measured acceleration samples · hover the track map to inspect a point</p>
+            </div>
+            <div class="gg-canvas-wrap">
+              <canvas id="gg-canvas" role="img" aria-label="G–G diagram with lateral acceleration on the horizontal axis and longitudinal acceleration on the vertical axis"></canvas>
             </div>
           </div>
         </div>
@@ -118,14 +143,15 @@
             <span>Driver</span>
             <select data-field="driver"></select>
           </label>
-          <label>
-            <span>Lap</span>
-            <select data-field="lap"></select>
+          <label class="lap-field">
+            <span>Laps</span>
+            <select data-field="lap" multiple size="7" aria-label="Select one or more laps"></select>
+            <small class="field-help">Click to add or remove individual laps. Shift-click selects a range.</small>
           </label>
         </div>
       </article>
     </template>
 
-    <script src="app.js?v=20260721-5"></script>
+    <script src="app.js?v=20260918-2"></script>
   </body>
 </html>
